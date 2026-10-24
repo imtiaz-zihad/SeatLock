@@ -1,0 +1,282 @@
+// Ticket / Reservation Booking API — Prisma schema (PostgreSQL)
+//
+// Concurrency notes (implement in the service layer + raw SQL migration):
+// 1. Seat hold must be atomic:
+//      UPDATE "Seat" SET status='HELD', "holdExpiresAt"=$1, "currentBookingId"=$2
+//      WHERE id = ANY($3) AND status='AVAILABLE'
+//    then assert affected rows === requested seat count, else rollback (inside prisma.$transaction).
+// 2. Optional stronger lock: SELECT ... FROM "Seat" WHERE id = ANY($1) FOR UPDATE (ordered by id to avoid deadlocks).
+// 3. Add this partial unique index in a custom migration (Prisma cannot express it):
+//      CREATE UNIQUE INDEX booking_item_active_seat
+//      ON "BookingItem" ("seatId") WHERE "isActive" = true;
+//    This makes double-booking impossible even if application logic has a bug.
+// 4. Payment webhooks are deduplicated via WebhookEvent.providerEventId (unique).
+
+// Prisma 7: the connection URL lives in prisma.config.ts (not here),
+// and the client is generated into src/generated/prisma.
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────── Enums ─────────────
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+  COMPLETED
+}
+
+enum SeatStatus {
+  AVAILABLE
+  HELD
+  SOLD
+}
+
+enum BookingStatus {
+  PENDING    // seats held, waiting for payment
+  CONFIRMED  // payment succeeded
+  EXPIRED    // hold timed out (cron)
+  CANCELLED  // user/organizer cancelled
+  REFUNDED
+}
+
+enum PaymentStatus {
+  INITIATED
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+}
+
+// ───────────── Auth (Better Auth core tables) ─────────────
+// Better Auth owns User/Session/Account/Verification. Do not rename these models.
+// "role" is an extra field we added (auth.ts -> user.additionalFields).
+// Values: USER | ORGANIZER | ADMIN  (kept as String because Better Auth additionalFields are strings)
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  role          String   @default("USER")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions  Session[]
+  accounts  Account[]
+  events    Event[]    @relation("OrganizerEvents")
+  bookings  Booking[]
+  auditLogs AuditLog[]
+
+  @@index([role])
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+// ───────────── Catalog ─────────────
+
+model Event {
+  id          String      @id @default(uuid())
+  organizerId String
+  title       String
+  description String?
+  venue       String
+  startsAt    DateTime
+  endsAt      DateTime
+  status      EventStatus @default(DRAFT)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?   // soft delete
+
+  organizer User       @relation("OrganizerEvents", fields: [organizerId], references: [id])
+  tiers     TicketTier[]
+  seats     Seat[]
+  bookings  Booking[]
+
+  @@index([status, startsAt])
+  @@index([organizerId])
+}
+
+model TicketTier {
+  id         String @id @default(uuid())
+  eventId    String
+  name       String // e.g. VIP, Regular
+  priceCents Int
+  currency   String @default("USD")
+
+  event Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  seats Seat[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Seat {
+  id               String     @id @default(uuid())
+  eventId          String
+  tierId           String
+  section          String
+  row              String
+  number           Int
+  status           SeatStatus @default(AVAILABLE)
+  holdExpiresAt    DateTime?
+  currentBookingId String?
+  version          Int        @default(0) // optimistic-lock fallback
+
+  event          Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tier           TicketTier  @relation(fields: [tierId], references: [id])
+  currentBooking Booking?    @relation("SeatCurrentBooking", fields: [currentBookingId], references: [id])
+  bookingItems   BookingItem[]
+
+  @@unique([eventId, section, row, number])
+  @@index([eventId, status])
+  @@index([status, holdExpiresAt]) // used by expiry cron
+}
+
+// ───────────── Booking & Payment ─────────────
+
+model Booking {
+  id             String        @id @default(uuid())
+  userId         String
+  eventId        String
+  status         BookingStatus @default(PENDING)
+  totalCents     Int
+  currency       String        @default("USD")
+  idempotencyKey String
+  expiresAt      DateTime      // now + 15 minutes at creation
+  confirmedAt    DateTime?
+  cancelledAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user      User          @relation(fields: [userId], references: [id])
+  event     Event         @relation(fields: [eventId], references: [id])
+  items     BookingItem[]
+  payments  Payment[]
+  heldSeats Seat[]        @relation("SeatCurrentBooking")
+
+  @@unique([userId, idempotencyKey]) // client retries never create duplicates
+  @@index([status, expiresAt])       // expiry cron
+  @@index([userId, createdAt])
+  @@index([eventId])
+}
+
+model BookingItem {
+  id         String   @id @default(uuid())
+  bookingId  String
+  seatId     String
+  priceCents Int
+  isActive   Boolean  @default(true) // set false on expire/cancel; partial unique index on seatId WHERE isActive
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  seat    Seat    @relation(fields: [seatId], references: [id])
+
+  @@index([bookingId])
+  @@index([seatId])
+}
+
+model Payment {
+  id                String        @id @default(uuid())
+  bookingId         String
+  provider          String        // e.g. "stripe"
+  providerPaymentId String        @unique
+  status            PaymentStatus @default(INITIATED)
+  amountCents       Int
+  currency          String        @default("USD")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([status])
+}
+
+model WebhookEvent {
+  id              String        @id @default(uuid())
+  provider        String
+  providerEventId String        @unique // idempotency: duplicate deliveries are ignored
+  type            String
+  payload         Json
+  status          WebhookStatus @default(RECEIVED)
+  error           String?
+  receivedAt      DateTime      @default(now())
+  processedAt     DateTime?
+
+  @@index([status, receivedAt])
+}
+
+// ───────────── Audit ─────────────
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String   // e.g. BOOKING_CREATED, BOOKING_EXPIRED
+  entityType String
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
