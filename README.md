@@ -236,4 +236,3 @@ A concurrency test (many parallel requests for one seat, exactly one succeeds) i
 - Users cannot set their own role at sign-up.
 - The Better Auth handler is mounted before `express.json()`, as required by the library.
 
-T
