@@ -7,6 +7,7 @@ vi.mock("./event.repository.js", () => ({
   listPublished: vi.fn(),
   update: vi.fn(),
   softDelete: vi.fn(),
+  countSetup: vi.fn(),
 }));
 
 import * as repo from "./event.repository.js";
@@ -128,13 +129,27 @@ describe("updateEvent", () => {
 });
 
 describe("publishEvent", () => {
-  it("publishes a draft", async () => {
+  it("publishes a draft that has tiers and seats", async () => {
     mocked.findById.mockResolvedValue(makeEvent() as never);
+    mocked.countSetup.mockResolvedValue({ tiers: 2, seats: 100 });
     mocked.update.mockResolvedValue(makeEvent({ status: "PUBLISHED" }) as never);
 
     await service.publishEvent(id, owner);
 
     expect(mocked.update).toHaveBeenCalledWith(id, { status: "PUBLISHED" });
+  });
+
+  it("refuses to publish without tiers", async () => {
+    mocked.findById.mockResolvedValue(makeEvent() as never);
+    mocked.countSetup.mockResolvedValue({ tiers: 0, seats: 0 });
+    await expect(service.publishEvent(id, owner)).rejects.toMatchObject({ status: 409, code: "NO_TIERS" });
+    expect(mocked.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to publish without seats", async () => {
+    mocked.findById.mockResolvedValue(makeEvent() as never);
+    mocked.countSetup.mockResolvedValue({ tiers: 1, seats: 0 });
+    await expect(service.publishEvent(id, owner)).rejects.toMatchObject({ status: 409, code: "NO_SEATS" });
   });
 
   it("refuses to publish twice", async () => {

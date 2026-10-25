@@ -44,6 +44,9 @@ export function requireRole(...roles: string[]) {
   };
 }
 
+// Shortcut for routes only organizers and admins may use.
+export const organizerOnly = [requireAuth, requireRole("ORGANIZER", "ADMIN")];
+
 // The current user as an Actor, or null when not signed in.
 export function getActor(res: Response): Actor | null {
   const user = res.locals.user as { id: string; role?: string | null } | undefined;

@@ -1,21 +1,12 @@
 import { AppError } from "../../lib/errors.js";
 import { toPage } from "../../lib/pagination.js";
+import { assertCanManageEvent, canManageEvent } from "../../lib/permissions.js";
 import type { Actor } from "../../lib/types.js";
 import * as repo from "./event.repository.js";
+import { assertEventOpen } from "./event.rules.js";
 import type { CreateEventInput, ListEventsQuery, UpdateEventInput } from "./event.schemas.js";
 
 // Business rules live here. No Express, no direct Prisma.
-
-function canManage(event: { organizerId: string }, actor: Actor | null) {
-  if (!actor) return false;
-  return actor.role === "ADMIN" || event.organizerId === actor.id;
-}
-
-function assertCanManage(event: { organizerId: string }, actor: Actor) {
-  if (!canManage(event, actor)) {
-    throw AppError.forbidden("You can only manage your own events");
-  }
-}
 
 async function getOrThrow(id: string) {
   const event = await repo.findById(id);
@@ -37,19 +28,22 @@ export async function listEvents(query: ListEventsQuery) {
 export async function getEvent(id: string, actor: Actor | null) {
   const event = await getOrThrow(id);
 
-  if (event.status !== "PUBLISHED" && !canManage(event, actor)) {
+  if (event.status !== "PUBLISHED" && !canManageEvent(event, actor)) {
     throw AppError.notFound("Event");
   }
   return event;
 }
 
-export async function updateEvent(id: string, actor: Actor, input: UpdateEventInput) {
+// For write operations on an event or on things inside it (tiers, seats).
+export async function getManageableEvent(id: string, actor: Actor) {
   const event = await getOrThrow(id);
-  assertCanManage(event, actor);
+  assertCanManageEvent(event, actor);
+  return event;
+}
 
-  if (event.status === "CANCELLED" || event.status === "COMPLETED") {
-    throw AppError.conflict("EVENT_NOT_EDITABLE", `A ${event.status.toLowerCase()} event cannot be edited`);
-  }
+export async function updateEvent(id: string, actor: Actor, input: UpdateEventInput) {
+  const event = await getManageableEvent(id, actor);
+  assertEventOpen(event);
 
   // The new dates must make sense together with the stored ones.
   const startsAt = input.startsAt ?? event.startsAt;
@@ -62,8 +56,7 @@ export async function updateEvent(id: string, actor: Actor, input: UpdateEventIn
 }
 
 export async function publishEvent(id: string, actor: Actor) {
-  const event = await getOrThrow(id);
-  assertCanManage(event, actor);
+  const event = await getManageableEvent(id, actor);
 
   if (event.status !== "DRAFT") {
     throw AppError.conflict("INVALID_STATE", "Only a draft event can be published");
@@ -71,14 +64,20 @@ export async function publishEvent(id: string, actor: Actor) {
   if (event.startsAt <= new Date()) {
     throw AppError.conflict("EVENT_IN_PAST", "An event that already started cannot be published");
   }
-  // Later: require at least one tier and one seat before publishing.
+
+  const setup = await repo.countSetup(id);
+  if (setup.tiers === 0) {
+    throw AppError.conflict("NO_TIERS", "Add at least one ticket tier before publishing");
+  }
+  if (setup.seats === 0) {
+    throw AppError.conflict("NO_SEATS", "Add seats before publishing");
+  }
 
   return repo.update(id, { status: "PUBLISHED" });
 }
 
 export async function cancelEvent(id: string, actor: Actor) {
-  const event = await getOrThrow(id);
-  assertCanManage(event, actor);
+  const event = await getManageableEvent(id, actor);
 
   if (event.status !== "DRAFT" && event.status !== "PUBLISHED") {
     throw AppError.conflict("INVALID_STATE", "Only a draft or published event can be cancelled");
@@ -89,8 +88,7 @@ export async function cancelEvent(id: string, actor: Actor) {
 }
 
 export async function deleteEvent(id: string, actor: Actor) {
-  const event = await getOrThrow(id);
-  assertCanManage(event, actor);
+  const event = await getManageableEvent(id, actor);
 
   if (event.status === "PUBLISHED" || event.status === "COMPLETED") {
     throw AppError.conflict("INVALID_STATE", "Cancel the event before deleting it");

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { optionalAuth, requireAuth, requireRole } from "../../middlewares/auth.js";
+import { optionalAuth, organizerOnly } from "../../middlewares/auth.js";
 import { validate } from "../../middlewares/validate.js";
 import * as controller from "./event.controller.js";
 import {
@@ -10,8 +10,6 @@ import {
 } from "./event.schemas.js";
 
 export const eventRouter = Router();
-
-const organizerOnly = [requireAuth, requireRole("ORGANIZER", "ADMIN")];
 
 // Public
 eventRouter.get("/", validate({ query: listEventsQuerySchema }), controller.list);

@@ -65,3 +65,12 @@ export function softDelete(id: string) {
     data: { deletedAt: new Date() },
   });
 }
+
+// How much of the event is set up. Used by the publish rule.
+export async function countSetup(eventId: string) {
+  const [tiers, seats] = await Promise.all([
+    prisma.ticketTier.count({ where: { eventId } }),
+    prisma.seat.count({ where: { eventId } }),
+  ]);
+  return { tiers, seats };
+}

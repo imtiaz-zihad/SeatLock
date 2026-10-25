@@ -6,6 +6,8 @@ import { auth } from "./lib/auth.js";
 import { requireAuth, requireRole } from "./middlewares/auth.js";
 import { errorHandler, notFoundHandler } from "./middlewares/error-handler.js";
 import { eventRouter } from "./modules/events/event.routes.js";
+import { seatRouter } from "./modules/seats/seat.routes.js";
+import { tierRouter } from "./modules/tiers/tire.routes.js"
 
 export const app = express();
 
@@ -36,6 +38,8 @@ app.get("/api/organizer/ping", requireAuth, requireRole("ORGANIZER", "ADMIN"), (
 });
 
 app.use("/events", eventRouter);
+app.use("/events/:id/tiers", tierRouter);
+app.use("/events/:id/seats", seatRouter);
 
 // These two must stay at the very end.
 app.use(notFoundHandler);
