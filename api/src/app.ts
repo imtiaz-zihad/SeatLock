@@ -4,6 +4,8 @@ import helmet from "helmet";
 import { toNodeHandler } from "better-auth/node";
 import { auth } from "./lib/auth.js";
 import { requireAuth, requireRole } from "./middlewares/auth.js";
+import { errorHandler, notFoundHandler } from "./middlewares/error-handler.js";
+import { eventRouter } from "./modules/events/event.routes.js";
 
 export const app = express();
 
@@ -15,8 +17,8 @@ app.use(
   }),
 );
 
-// IMPORTANT: Better Auth handler express.json()-er AGE.
-// Express 5 (ei guide) = "*splat". Express 4 hole "/api/auth/*".
+// IMPORTANT: Better Auth handler must come BEFORE express.json().
+// Express 5 = "*splat". Express 4 would be "/api/auth/*".
 app.all("/api/auth/*splat", toNodeHandler(auth));
 
 app.use(express.json());
@@ -32,3 +34,9 @@ app.get("/api/me", requireAuth, (_req, res) => {
 app.get("/api/organizer/ping", requireAuth, requireRole("ORGANIZER", "ADMIN"), (_req, res) => {
   res.json({ message: "organizer access ok" });
 });
+
+app.use("/events", eventRouter);
+
+// These two must stay at the very end.
+app.use(notFoundHandler);
+app.use(errorHandler);

@@ -19,7 +19,7 @@ When thousands of people try to buy the same seat at once, a naive "check if fre
 - Role-based access control (`USER`, `ORGANIZER`, `ADMIN`)
 - Protected routes with `requireAuth` and `requireRole` middleware
 - Full PostgreSQL schema (events, tiers, seats, bookings, payments, webhooks, audit log) managed with Prisma migrations
-- Health check endpoint and automated tests
+- Health check endpoint
 
 **Planned**
 - Event, ticket tier and seat management for organizers
@@ -78,7 +78,7 @@ seatlock/
 ├── api/
 │   ├── prisma/
 │   │   └── schema.prisma
-│   ├── prisma.config.ts
+│   ├── prisma7.config.ts
 │   ├── src/
 │   │   ├── app.ts             # Express app, routes, middleware
 │   │   ├── server.ts          # entry point
@@ -103,8 +103,8 @@ seatlock/
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/seatlock.git
-cd seatlock/api
+git clone https://github.com/imtiaz-zihad/SeatLock.git
+cd SeatLock/api
 npm install
 ```
 
@@ -138,7 +138,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 ```bash
 npm run db:migrate -- --name init
-npm run db:generate
+npx prisma generate
 ```
 
 ### 5. Run
@@ -159,7 +159,6 @@ The API runs at `http://localhost:4000`.
 | `npm test` | Run tests |
 | `npm run typecheck` | Type-check without building |
 | `npm run db:migrate` | Create and apply a migration |
-| `npm run db:generate` | Generate the Prisma client |
 | `npm run db:studio` | Open Prisma Studio |
 
 ## API
@@ -219,7 +218,7 @@ A concurrency test (many parallel requests for one seat, exactly one succeeds) i
 - [x] Project setup (TypeScript, ESM, Express 5)
 - [x] PostgreSQL schema and Prisma 7 migrations
 - [x] Authentication and roles with Better Auth
-- [x] Basic tests
+- [ ] Basic tests (health check, auth mount)
 - [ ] Events, tiers and seats
 - [ ] Booking with seat hold, transactions and idempotency
 - [ ] Hold expiry job
@@ -235,4 +234,3 @@ A concurrency test (many parallel requests for one seat, exactly one succeeds) i
 - Secrets live in `.env`, which is git-ignored. Never commit it.
 - Users cannot set their own role at sign-up.
 - The Better Auth handler is mounted before `express.json()`, as required by the library.
-
