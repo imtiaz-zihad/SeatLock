@@ -1,46 +1,105 @@
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import { toNodeHandler } from "better-auth/node";
-import { auth } from "../lib/auth.js";
-import { requireAuth, requireRole } from "../middlewares/auth.js";
-import { errorHandler, notFoundHandler } from "../middlewares/error-handler.js";
-import { eventRouter } from "../modules/events/event.routes.js";
-import { seatRouter } from "../modules/seats/seat.routes.js";
-import { tierRouter } from "../modules/tiers/tire.routes.js";
+import request from "supertest";
+import { describe, expect, it } from "vitest";
+import { app } from "../app.js";
 
-export const app = express();
+describe("API basics", () => {
+  it("GET /health returns ok", async () => {
+    const res = await request(app).get("/health");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+  });
 
-app.use(helmet());
-app.use(
-  cors({
-    origin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
-    credentials: true,
-  }),
-);
-
-// IMPORTANT: Better Auth handler must come BEFORE express.json().
-// Express 5 = "*splat". Express 4 would be "/api/auth/*".
-app.all("/api/auth/*splat", toNodeHandler(auth));
-
-app.use(express.json());
-
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", uptime: process.uptime() });
+  it("Better Auth is mounted (GET /api/auth/ok)", async () => {
+    const res = await request(app).get("/api/auth/ok");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
 });
 
-app.get("/api/me", requireAuth, (_req, res) => {
-  res.json({ user: res.locals.user });
+describe("error handling", () => {
+  it("returns a JSON 404 for unknown routes", async () => {
+    const res = await request(app).get("/nope");
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("NOT_FOUND");
+  });
+
+  it("returns 400 for malformed JSON", async () => {
+    const res = await request(app).post("/events").set("Content-Type", "application/json").send("{bad json");
+    expect(res.status).toBe(400);
+  });
 });
 
-app.get("/api/organizer/ping", requireAuth, requireRole("ORGANIZER", "ADMIN"), (_req, res) => {
-  res.json({ message: "organizer access ok" });
+describe("events routes (no database needed)", () => {
+  it("POST /events without login is 401", async () => {
+    const res = await request(app).post("/events").send({});
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+  });
+
+  it("GET /events/not-a-uuid is 400", async () => {
+    const res = await request(app).get("/events/not-a-uuid");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("GET /events?limit=999 is 400", async () => {
+    const res = await request(app).get("/events?limit=999");
+    expect(res.status).toBe(400);
+    expect(res.body.error.details[0].path).toBe("query.limit");
+  });
 });
 
-app.use("/events", eventRouter);
-app.use("/events/:id/tiers", tierRouter);
-app.use("/events/:id/seats", seatRouter);
+describe("tier and seat routes (no database needed)", () => {
+  const eventId = "11111111-1111-4111-8111-111111111111";
 
-// These two must stay at the very end.
-app.use(notFoundHandler);
-app.use(errorHandler);
+  it("POST /events/:id/tiers without login is 401", async () => {
+    const res = await request(app).post(`/events/${eventId}/tiers`).send({});
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /events/:id/seats/bulk without login is 401", async () => {
+    const res = await request(app).post(`/events/${eventId}/seats/bulk`).send({});
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /events/not-a-uuid/seats is 400", async () => {
+    const res = await request(app).get("/events/not-a-uuid/seats");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("GET /events/:id/seats?status=BROKEN is 400", async () => {
+    const res = await request(app).get(`/events/${eventId}/seats?status=BROKEN`);
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /events/:id/tiers with a bad id is 400", async () => {
+    const res = await request(app).get("/events/abc/tiers");
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("booking routes (no database needed)", () => {
+  const bookingId = "33333333-3333-4333-8333-333333333333";
+
+  it("POST /bookings without login is 401", async () => {
+    const res = await request(app).post("/bookings").send({});
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /bookings without login is 401", async () => {
+    const res = await request(app).get("/bookings");
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /bookings/:id without login is 401", async () => {
+    const res = await request(app).get(`/bookings/${bookingId}`);
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /bookings/:id/cancel without login is 401", async () => {
+    const res = await request(app).post(`/bookings/${bookingId}/cancel`);
+    expect(res.status).toBe(401);
+  });
+});
+

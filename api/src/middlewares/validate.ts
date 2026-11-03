@@ -6,9 +6,10 @@ type Schemas = {
   params?: ZodType;
   query?: ZodType;
   body?: ZodType;
+  headers?: ZodType; // header names are lowercase, e.g. "idempotency-key"
 };
 
-// Validates params, query and body with Zod.
+// Validates headers, params, query and body with Zod.
 // Clean, typed values are stored in res.locals.validated
 // (Express 5 does not allow overwriting req.query, so we do not touch req).
 export function validate(schemas: Schemas) {
@@ -16,7 +17,7 @@ export function validate(schemas: Schemas) {
     const validated: Record<string, unknown> = {};
     const problems: ErrorDetail[] = [];
 
-    for (const part of ["params", "query", "body"] as const) {
+    for (const part of ["headers", "params", "query", "body"] as const) {
       const schema = schemas[part];
       if (!schema) continue;
 
