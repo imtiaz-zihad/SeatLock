@@ -5,6 +5,10 @@ import type { ListBookingsQuery } from "./booking.schemas.js";
 
 const bookingInclude = {
   event: { select: { id: true, title: true, venue: true, startsAt: true } },
+  payments: {
+    select: { id: true, status: true, amountCents: true, currency: true, provider: true, providerPaymentId: true, createdAt: true },
+    orderBy: { createdAt: "desc" },
+  },
   items: {
     where: { isActive: true },
     select: {

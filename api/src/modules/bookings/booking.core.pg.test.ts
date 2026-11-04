@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
-import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-
+import type { Sql } from "../../lib/sql.js";
+import { createTestDb } from "../../tests/pg-helpers.js";
 import { cancelBooking, expireDueBookings, holdSeats } from "./booking.core.js";
-import { Sql } from "../../lib/sql.js";
 
 // Runs the real booking SQL against a real PostgreSQL database.
 // Skipped unless TEST_DATABASE_URL is set. Use a SEPARATE test database:
@@ -11,121 +10,25 @@ import { Sql } from "../../lib/sql.js";
 const url = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(!url)("booking core on a real database", () => {
-  const pool = new pg.Pool({ connectionString: url, max: 60 });
-
-  const wrap = (client: pg.PoolClient): Sql => ({
-    async query(sql, params = []) {
-      return (await client.query(sql, params)).rows;
-    },
-    async execute(sql, params = []) {
-      return (await client.query(sql, params)).rowCount ?? 0;
-    },
-  });
-
-  // Same shape as the production code: one transaction per operation.
-  async function inTx<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await fn(wrap(client));
-      await client.query("COMMIT");
-      return result;
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
-
-  // Really simultaneous transactions: every connection is opened and BEGIN-ed first,
-  // then a gate opens and all jobs start at the same moment.
-  async function race<T>(jobs: Array<(sql: Sql) => Promise<T>>) {
-    const clients = await Promise.all(jobs.map(() => pool.connect()));
-    try {
-      await Promise.all(clients.map((c) => c.query("BEGIN")));
-      let openGate!: () => void;
-      const gate = new Promise<void>((resolve) => (openGate = resolve));
-
-      const runs = jobs.map(async (job, i) => {
-        const client = clients[i]!;
-        await gate;
-        try {
-          const result = await job(wrap(client));
-          await client.query("COMMIT");
-          return result;
-        } catch (err) {
-          await client.query("ROLLBACK");
-          throw err;
-        }
-      });
-
-      openGate();
-      return await Promise.allSettled(runs);
-    } finally {
-      clients.forEach((c) => c.release());
-    }
-  }
+  const db = createTestDb(url);
+  const { q, inTx, race, createUsers, createEvent, seatStatus } = db;
 
   const holdJob = (userId: string, eventId: string, seatIds: string[], key: string = randomUUID()) => (sql: Sql) =>
     holdSeats(sql, { userId, eventId, seatIds, idempotencyKey: key, holdMinutes: 15, now: new Date() });
 
-  const q = async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-    (await pool.query(sql, params)).rows as T[];
-
-  // ---------- test data ----------
-  async function createUsers(n: number) {
-    const ids = Array.from({ length: n }, () => randomUUID());
-    for (const id of ids) {
-      await q(`INSERT INTO "User" (id, name, email, "updatedAt") VALUES ($1, 'User', $2, now())`, [id, `${id}@test.dev`]);
-    }
-    return ids;
-  }
-
-  async function createEvent(seatCount: number, opts: { priceCents?: number; status?: string } = {}) {
-    const [organizer] = await createUsers(1);
-    const eventId = randomUUID();
-    const tierId = randomUUID();
-    await q(
-      `INSERT INTO "Event" (id, "organizerId", title, venue, "startsAt", "endsAt", status, "updatedAt")
-       VALUES ($1, $2, 'Test Event', 'Hall',
-               (now() AT TIME ZONE 'UTC') + interval '10 days', (now() AT TIME ZONE 'UTC') + interval '11 days',
-               $3::"EventStatus", now())`,
-      [eventId, organizer, opts.status ?? "PUBLISHED"],
-    );
-    await q(`INSERT INTO "TicketTier" (id, "eventId", name, "priceCents", currency) VALUES ($1, $2, 'Regular', $3, 'USD')`, [
-      tierId,
-      eventId,
-      opts.priceCents ?? 5000,
-    ]);
-    const seatIds: string[] = [];
-    for (let i = 1; i <= seatCount; i++) {
-      const id = randomUUID();
-      seatIds.push(id);
-      await q(`INSERT INTO "Seat" (id, "eventId", "tierId", section, "row", number) VALUES ($1, $2, $3, 'A', '1', $4)`, [
-        id,
-        eventId,
-        tierId,
-        i,
-      ]);
-    }
-    return { eventId, tierId, seatIds };
-  }
-
   const hold = (userId: string, eventId: string, seatIds: string[], key: string = randomUUID()) =>
     inTx((sql) => holdSeats(sql, { userId, eventId, seatIds, idempotencyKey: key, holdMinutes: 15, now: new Date() }));
 
-  const seatStatus = async (id: string) => (await q<{ status: string }>(`SELECT status::text AS status FROM "Seat" WHERE id = $1`, [id]))[0]!.status;
 
   // ---------- lifecycle ----------
   beforeAll(async () => {
-    await pool.query("SELECT 1");
+    await q("SELECT 1");
   });
   beforeEach(async () => {
-    await q(`TRUNCATE "User" CASCADE`);
+    await db.reset();
   });
   afterAll(async () => {
-    await pool.end();
+    await db.close();
   });
 
   // ---------- tests ----------

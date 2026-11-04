@@ -103,3 +103,35 @@ describe("booking routes (no database needed)", () => {
   });
 });
 
+describe("payment routes (no database needed)", () => {
+  const bookingId = "33333333-3333-4333-8333-333333333333";
+
+  it("POST /bookings/:id/pay without login is 401", async () => {
+    const res = await request(app).post(`/bookings/${bookingId}/pay`);
+    expect(res.status).toBe(401);
+  });
+
+  it("webhook without a signature is 400 INVALID_SIGNATURE", async () => {
+    const res = await request(app)
+      .post("/webhooks/payments")
+      .set("Content-Type", "application/json")
+      .send(JSON.stringify({ id: "evt_1", type: "payment.succeeded" }));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_SIGNATURE");
+  });
+
+  it("webhook with a wrong signature is 400", async () => {
+    const res = await request(app)
+      .post("/webhooks/payments")
+      .set("Content-Type", "application/json")
+      .set("x-signature", `t=${Math.floor(Date.now() / 1000)},v1=${"a".repeat(64)}`)
+      .send(JSON.stringify({ id: "evt_1", type: "payment.succeeded" }));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_SIGNATURE");
+  });
+
+  it("webhook that is not JSON content-type is 400", async () => {
+    const res = await request(app).post("/webhooks/payments").set("Content-Type", "text/plain").send("hello");
+    expect(res.status).toBe(400);
+  });
+});
