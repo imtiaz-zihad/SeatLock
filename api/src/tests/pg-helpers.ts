@@ -88,16 +88,20 @@ export function createTestDb(url: string | undefined) {
     return ids;
   }
 
-  async function createEvent(seatCount: number, opts: { priceCents?: number; status?: string } = {}) {
+  async function createEvent(
+    seatCount: number,
+    opts: { priceCents?: number; status?: string; startsInHours?: number } = {},
+  ) {
     const [organizer] = await createUsers(1);
     const eventId = randomUUID();
     const tierId = randomUUID();
     await q(
       `INSERT INTO "Event" (id, "organizerId", title, venue, "startsAt", "endsAt", status, "updatedAt")
        VALUES ($1, $2, 'Test Event', 'Hall',
-               (now() AT TIME ZONE 'UTC') + interval '10 days', (now() AT TIME ZONE 'UTC') + interval '11 days',
+               (now() AT TIME ZONE 'UTC') + make_interval(hours => $4::int),
+               (now() AT TIME ZONE 'UTC') + make_interval(hours => $4::int) + interval '1 day',
                $3::"EventStatus", now())`,
-      [eventId, organizer, opts.status ?? "PUBLISHED"],
+      [eventId, organizer, opts.status ?? "PUBLISHED", opts.startsInHours ?? 240],
     );
     await q(`INSERT INTO "TicketTier" (id, "eventId", name, "priceCents", currency) VALUES ($1, $2, 'Regular', $3, 'USD')`, [
       tierId,

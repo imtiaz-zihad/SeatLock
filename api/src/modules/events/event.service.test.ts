@@ -10,6 +10,11 @@ vi.mock("./event.repository.js", () => ({
   countSetup: vi.fn(),
 }));
 
+vi.mock("../cancellations/cancellation.service.js", () => ({
+  cancelEventAndRefund: vi.fn(),
+}));
+
+import * as cancellation from "../cancellations/cancellation.service.js";
 import * as repo from "./event.repository.js";
 import * as service from "./event.service.js";
 
@@ -164,18 +169,37 @@ describe("publishEvent", () => {
 });
 
 describe("cancelEvent", () => {
-  it("cancels a published event", async () => {
+  const summary = { bookingsRefunded: 3, bookingsCancelled: 1, refundCallsFailed: 0 };
+
+  it("cancels a published event and refunds through the cancellation service", async () => {
     mocked.findById.mockResolvedValue(makeEvent({ status: "PUBLISHED" }) as never);
-    mocked.update.mockResolvedValue(makeEvent({ status: "CANCELLED" }) as never);
+    vi.mocked(cancellation.cancelEventAndRefund).mockResolvedValue(summary);
 
-    await service.cancelEvent(id, owner);
+    const result = await service.cancelEvent(id, owner);
 
-    expect(mocked.update).toHaveBeenCalledWith(id, { status: "CANCELLED" });
+    expect(cancellation.cancelEventAndRefund).toHaveBeenCalledWith(id, "owner-1");
+    expect(result.summary).toEqual(summary);
   });
 
   it("cannot cancel twice", async () => {
     mocked.findById.mockResolvedValue(makeEvent({ status: "CANCELLED" }) as never);
     await expect(service.cancelEvent(id, owner)).rejects.toMatchObject({ status: 409 });
+    expect(cancellation.cancelEventAndRefund).not.toHaveBeenCalled();
+  });
+
+  it("another organizer cannot cancel the event", async () => {
+    mocked.findById.mockResolvedValue(makeEvent({ status: "PUBLISHED" }) as never);
+    await expect(service.cancelEvent(id, stranger)).rejects.toMatchObject({ status: 403 });
+    expect(cancellation.cancelEventAndRefund).not.toHaveBeenCalled();
+  });
+
+  it("an admin can cancel any event", async () => {
+    mocked.findById.mockResolvedValue(makeEvent({ status: "DRAFT" }) as never);
+    vi.mocked(cancellation.cancelEventAndRefund).mockResolvedValue(summary);
+
+    await service.cancelEvent(id, admin);
+
+    expect(cancellation.cancelEventAndRefund).toHaveBeenCalledWith(id, "admin-1");
   });
 });
 

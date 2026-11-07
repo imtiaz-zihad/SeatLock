@@ -1,8 +1,9 @@
 import { AppError } from "../../lib/errors.js";
 import { toPage } from "../../lib/pagination.js";
 import { prisma } from "../../lib/prisma.js";
-import { prismaSql, PrismaTx } from "../../lib/sql.js";
+import { type PrismaTx, prismaSql } from "../../lib/sql.js";
 import type { Actor } from "../../lib/types.js";
+import { issueRefunds } from "../payments/payment.refunds.js";
 import * as core from "./booking.core.js";
 import * as repo from "./booking.repository.js";
 import type { CreateBookingInput, ListBookingsQuery } from "./booking.schemas.js";
@@ -59,13 +60,24 @@ export async function getBooking(actor: Actor, id: string) {
   return presentBooking(booking);
 }
 
+// A confirmed booking can be cancelled until CANCELLATION_CUTOFF_HOURS before the event (default 24).
+function cutoffHours() {
+  const hours = Number(process.env.CANCELLATION_CUTOFF_HOURS ?? 24);
+  return Number.isFinite(hours) && hours >= 0 ? Math.floor(hours) : 24;
+}
+
 export async function cancelBooking(actor: Actor, id: string) {
-  await withRetry<void>(() =>
+  const { refund } = await withRetry<core.CancelResult>(() =>
     prisma.$transaction(
-      (tx: PrismaTx) => core.cancelBooking(prismaSql(tx), { bookingId: id, actor, now: new Date() }),
+      (tx: PrismaTx) =>
+        core.cancelBooking(prismaSql(tx), { bookingId: id, actor, now: new Date(), cutoffHours: cutoffHours() }),
       TX_OPTIONS,
     ),
   );
+
+  // The database is committed. Now return the money (never while holding locks).
+  if (refund) await issueRefunds([refund]);
+
   return presentBooking(await loadOrThrow(id));
 }
 

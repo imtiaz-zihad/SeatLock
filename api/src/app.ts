@@ -5,6 +5,7 @@ import { toNodeHandler } from "better-auth/node";
 import { auth } from "./lib/auth.js";
 import { requireAuth, requireRole } from "./middlewares/auth.js";
 import { errorHandler, notFoundHandler } from "./middlewares/error-handler.js";
+import { adminRouter } from "./modules/admin/admin.routes.js";
 import { bookingRouter } from "./modules/bookings/booking.routes.js";
 import { eventRouter } from "./modules/events/event.routes.js";
 import { devPaymentRouter, payRouter, webhookRouter } from "./modules/payments/payment.routes.js";
@@ -45,6 +46,7 @@ app.get("/api/organizer/ping", requireAuth, requireRole("ORGANIZER", "ADMIN"), (
 app.use("/events", eventRouter);
 app.use("/events/:id/tiers", tierRouter);
 app.use("/events/:id/seats", seatRouter);
+app.use("/admin", adminRouter);
 app.use("/bookings/:id/pay", payRouter);
 app.use("/bookings", bookingRouter);
 

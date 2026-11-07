@@ -4,15 +4,21 @@ import type { Sql } from "./sql.js";
 export type AuditEntry = {
   actorId: string | null;
   action: string;
-  entityType: string; // "Booking", "Payment", ...
+  entityType: string; // "Booking", "Payment", "Event", ...
   entityId: string;
   metadata?: unknown;
 };
 
-// Writes several audit rows with one INSERT. Call it inside the same transaction as the change.
-export async function writeAudit(sql: Sql, nowIso: string, entries: AuditEntry[]) {
-  if (entries.length === 0) return;
+const CHUNK = 500; // 500 rows x 6 parameters = 3000 parameters per statement (databases limit this)
 
+// Writes audit rows. Call it inside the same transaction as the change.
+export async function writeAudit(sql: Sql, nowIso: string, entries: AuditEntry[]) {
+  for (let from = 0; from < entries.length; from += CHUNK) {
+    await insertChunk(sql, nowIso, entries.slice(from, from + CHUNK));
+  }
+}
+
+async function insertChunk(sql: Sql, nowIso: string, entries: AuditEntry[]) {
   const last = entries.length * 6 + 1; // index of the timestamp parameter
   const values = entries.map((_, i) => {
     const n = i * 6;

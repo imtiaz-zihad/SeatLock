@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../../lib/errors.js";
-import { Sql } from "../../lib/sql.js";
-import { constraintName } from "../../lib/prisma-error.js";
-
+import { writeAudit } from "../../lib/audit.js";
+import { constraintName } from "../../lib/prisma-error.js"
+import type { Sql } from "../../lib/sql.js";
 
 // The heart of SeatLock: every statement that decides who owns a seat.
 // All functions expect to run INSIDE a database transaction (caller opens it).
@@ -225,16 +225,29 @@ export type CancelInput = {
   bookingId: string;
   actor: { id: string; role: string };
   now: Date;
+  /** A confirmed booking can be cancelled until this many hours before the event starts (admins can always). */
+  cutoffHours?: number;
 };
 
-// Only a PENDING booking can be cancelled here. Refunding a paid booking comes with payments.
-export async function cancelBooking(sql: Sql, input: CancelInput): Promise<void> {
+export type CancelResult = {
+  /** Set when money must go back to the customer. The caller refunds AFTER the transaction. */
+  refund: { providerPaymentId: string; amountCents: number } | null;
+};
+
+// PENDING booking: just release the seats.
+// CONFIRMED booking: release the seats AND mark the payment refunded (before the cutoff).
+export async function cancelBooking(sql: Sql, input: CancelInput): Promise<CancelResult> {
   const { bookingId, actor } = input;
+  const cutoffHours = input.cutoffHours ?? 24;
   const nowIso = input.now.toISOString();
 
-  const rows = await sql.query<{ id: string; userId: string; status: string }>(
-    `SELECT id, "userId", status::text AS status FROM "Booking" WHERE id = $1 FOR UPDATE`,
-    [bookingId],
+  const rows = await sql.query<{ id: string; userId: string; status: string; windowClosed: boolean }>(
+    `SELECT b.id, b."userId", b.status::text AS status,
+            (e."startsAt" <= ${ts(2)} + make_interval(hours => $3::int)) AS "windowClosed"
+       FROM "Booking" b JOIN "Event" e ON e.id = b."eventId"
+      WHERE b.id = $1
+        FOR UPDATE OF b`,
+    [bookingId, nowIso, cutoffHours],
   );
   const booking = rows[0];
 
@@ -242,27 +255,83 @@ export async function cancelBooking(sql: Sql, input: CancelInput): Promise<void>
   if (!booking || (booking.userId !== actor.id && actor.role !== "ADMIN")) {
     throw AppError.notFound("Booking");
   }
-  if (booking.status !== "PENDING") {
-    throw AppError.conflict("INVALID_STATE", "Only a pending booking can be cancelled");
+
+  if (booking.status === "PENDING") {
+    await sql.execute(
+      `UPDATE "Booking" SET status = 'CANCELLED', "cancelledAt" = ${ts(2)}, "updatedAt" = ${ts(2)} WHERE id = $1`,
+      [bookingId, nowIso],
+    );
+    await releaseSeats(sql, [bookingId]);
+    await audit(sql, nowIso, [{ actorId: actor.id, action: "BOOKING_CANCELLED", entityId: bookingId }]);
+    return { refund: null };
   }
 
-  await sql.execute(
-    `UPDATE "Booking" SET status = 'CANCELLED', "cancelledAt" = ${ts(2)}, "updatedAt" = ${ts(2)} WHERE id = $1`,
-    [bookingId, nowIso],
-  );
-  await releaseSeats(sql, [bookingId]);
-  await audit(sql, nowIso, [{ actorId: actor.id, action: "BOOKING_CANCELLED", entityId: bookingId }]);
+  if (booking.status === "CONFIRMED") {
+    if (booking.windowClosed && actor.role !== "ADMIN") {
+      throw AppError.conflict(
+        "CANCELLATION_WINDOW_CLOSED",
+        `A confirmed booking can only be cancelled until ${cutoffHours} hours before the event starts`,
+      );
+    }
+
+    // Lock order everywhere: booking first, then payment.
+    const paid = await sql.query<{ id: string; providerPaymentId: string; amountCents: number }>(
+      `SELECT id, "providerPaymentId", "amountCents" FROM "Payment" WHERE "bookingId" = $1 AND status = 'SUCCEEDED' FOR UPDATE`,
+      [bookingId],
+    );
+    const payment = paid[0];
+
+    // Paid booking -> REFUNDED. Free booking (no payment) -> CANCELLED.
+    await sql.execute(
+      `UPDATE "Booking" SET status = $3::"BookingStatus", "cancelledAt" = ${ts(2)}, "updatedAt" = ${ts(2)} WHERE id = $1`,
+      [bookingId, nowIso, payment ? "REFUNDED" : "CANCELLED"],
+    );
+    if (payment) {
+      await sql.execute(`UPDATE "Payment" SET status = 'REFUNDED', "updatedAt" = ${ts(2)} WHERE id = $1`, [payment.id, nowIso]);
+    }
+    await releaseSeats(sql, [bookingId], { includeSold: true });
+
+    await writeAudit(sql, nowIso, [
+      {
+        actorId: actor.id,
+        action: "BOOKING_CANCELLED",
+        entityType: "Booking",
+        entityId: bookingId,
+        metadata: { refunded: Boolean(payment) },
+      },
+      ...(payment
+        ? [
+            {
+              actorId: actor.id,
+              action: "PAYMENT_REFUNDED",
+              entityType: "Payment",
+              entityId: payment.id,
+              metadata: { bookingId, reason: "booking_cancelled" },
+            },
+          ]
+        : []),
+    ]);
+
+    return {
+      refund: payment ? { providerPaymentId: payment.providerPaymentId, amountCents: payment.amountCents } : null,
+    };
+  }
+
+  throw AppError.conflict("INVALID_STATE", "Only a pending or confirmed booking can be cancelled");
 }
 
 // ───────────── Helpers ─────────────
 
 // Items stop counting and the seats become AVAILABLE again.
-async function releaseSeats(sql: Sql, bookingIds: string[]) {
+// SOLD seats are only released for a confirmed booking that gets cancelled.
+async function releaseSeats(sql: Sql, bookingIds: string[], opts: { includeSold?: boolean } = {}) {
+  const statuses = opts.includeSold ? `status IN ('HELD', 'SOLD')` : `status = 'HELD'`;
+
   await sql.execute(`UPDATE "BookingItem" SET "isActive" = false WHERE "bookingId" IN (${marks(1, bookingIds.length)})`, bookingIds);
   await sql.execute(
     `UPDATE "Seat"
         SET status = 'AVAILABLE', "holdExpiresAt" = NULL, "currentBookingId" = NULL, version = version + 1
-      WHERE status = 'HELD' AND "currentBookingId" IN (${marks(1, bookingIds.length)})`,
+      WHERE ${statuses} AND "currentBookingId" IN (${marks(1, bookingIds.length)})`,
     bookingIds,
   );
 }

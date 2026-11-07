@@ -2,6 +2,7 @@ import { AppError } from "../../lib/errors.js";
 import { toPage } from "../../lib/pagination.js";
 import { assertCanManageEvent, canManageEvent } from "../../lib/permissions.js";
 import type { Actor } from "../../lib/types.js";
+import * as cancellation from "../cancellations/cancellation.service.js";
 import * as repo from "./event.repository.js";
 import { assertEventOpen } from "./event.rules.js";
 import type { CreateEventInput, ListEventsQuery, UpdateEventInput } from "./event.schemas.js";
@@ -76,15 +77,16 @@ export async function publishEvent(id: string, actor: Actor) {
   return repo.update(id, { status: "PUBLISHED" });
 }
 
+// Cancels the event, every open booking, and refunds every payment (all in one transaction).
 export async function cancelEvent(id: string, actor: Actor) {
   const event = await getManageableEvent(id, actor);
 
   if (event.status !== "DRAFT" && event.status !== "PUBLISHED") {
     throw AppError.conflict("INVALID_STATE", "Only a draft or published event can be cancelled");
   }
-  // Later: refund all confirmed bookings of this event.
 
-  return repo.update(id, { status: "CANCELLED" });
+  const summary = await cancellation.cancelEventAndRefund(id, actor.id);
+  return { event: await getOrThrow(id), summary };
 }
 
 export async function deleteEvent(id: string, actor: Actor) {

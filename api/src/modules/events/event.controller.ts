@@ -36,7 +36,8 @@ export async function publish(_req: Request, res: Response) {
 
 export async function cancel(_req: Request, res: Response) {
   const { params } = (res.locals as Validated<{ params: { id: string } }>).validated;
-  res.json({ data: await service.cancelEvent(params.id, getActor(res)!) });
+  const { event, summary } = await service.cancelEvent(params.id, getActor(res)!);
+  res.json({ data: event, summary });
 }
 
 export async function remove(_req: Request, res: Response) {

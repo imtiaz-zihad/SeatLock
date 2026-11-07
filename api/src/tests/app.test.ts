@@ -135,3 +135,15 @@ describe("payment routes (no database needed)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("admin routes (no database needed)", () => {
+  it("GET /admin/stats without login is 401", async () => {
+    const res = await request(app).get("/admin/stats");
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /admin/audit-logs without login is 401", async () => {
+    const res = await request(app).get("/admin/audit-logs");
+    expect(res.status).toBe(401);
+  });
+});
